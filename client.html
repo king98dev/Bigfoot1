@@ -128,6 +128,35 @@
 
   /* tooltip */
   #tip { position:absolute; display:none; background:rgba(0,0,0,.85); border:1px solid #2a1a0a; color:#9a8060; padding:4px 12px; font-size:.7rem; pointer-events:none; }
+
+  /* JUMPSCARES */
+  #js-overlay {
+    position:fixed; inset:0; z-index:999; pointer-events:none;
+    display:none; align-items:center; justify-content:center; background:#000;
+  }
+  #js-face { font-size:clamp(10rem,38vw,26rem); filter:drop-shadow(0 0 60px #ff0000); transform-origin:center center; }
+  #js-text {
+    position:absolute; bottom:12%; left:0; right:0; text-align:center;
+    font-family:'Special Elite',cursive; font-size:clamp(2rem,6vw,4rem);
+    color:#cc0000; text-shadow:0 0 30px #ff0000,0 0 60px #ff4400;
+    letter-spacing:.2em; display:none;
+  }
+  #js-static {
+    position:fixed; inset:0; z-index:998; pointer-events:none; display:none; opacity:0;
+    background: repeating-linear-gradient(0deg,rgba(255,255,255,0.03) 0px,rgba(0,0,0,0.05) 1px,transparent 2px);
+    background-size:100% 4px;
+  }
+  #js-red { position:fixed; inset:0; z-index:997; pointer-events:none; background:rgba(200,0,0,0); transition:background .05s; }
+  @keyframes jsPulse{0%,100%{transform:scale(1) rotate(-3deg)}50%{transform:scale(1.2) rotate(4deg)}}
+  @keyframes jsShake{
+    0%{transform:translate(0,0)}10%{transform:translate(-10px,6px)}20%{transform:translate(10px,-6px)}
+    30%{transform:translate(-6px,10px)}40%{transform:translate(6px,-10px)}50%{transform:translate(-10px,4px)}
+    60%{transform:translate(10px,-4px)}70%{transform:translate(-4px,10px)}80%{transform:translate(4px,-10px)}
+    90%{transform:translate(-6px,6px)}100%{transform:translate(0,0)}
+  }
+  @keyframes jsCrawl{0%{transform:scaleX(-1) translateX(-120%)}100%{transform:scaleX(-1) translateX(120%)}}
+  @keyframes jsFloat{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-30px) scale(1.1)}}
+  body.shaking{animation:jsShake 0.6s ease;}
 </style>
 </head>
 <body>
@@ -200,6 +229,14 @@
   </div>
 
   <div id="tip"></div>
+</div>
+
+<!-- JUMPSCARE LAYERS -->
+<div id="js-red"></div>
+<div id="js-static"></div>
+<div id="js-overlay">
+  <div id="js-face">🦶</div>
+  <div id="js-text">IT FOUND YOU</div>
 </div>
 
 <!-- Three.js r128 -->
@@ -698,14 +735,19 @@ function startWind(){ if(windRunning)return; windRunning=true; (function loop(){
 socket.on('state', s => { state=s; });
 socket.on('log', msg => addLog(msg));
 socket.on('bigfoot_stunned', ({x,y}) => {
-  playSound('trap',0.6);playSound('roar',0.5);
+  playSound('trap',0.6);
   showTip('BIGFOOT STUNNED!', 2000);
+  if(Math.random()<0.5) triggerScare('bigfoot_close');
 });
 socket.on('trap_triggered', () => { playSound('trap',0.8); });
 socket.on('shot_fired', ({x,y}) => { playSound('shoot',0.5, distToMe(x,y)); });
 socket.on('door_opened', () => { playSound('door',0.5); showTip('🚪 DOOR OPEN',2000); });
 socket.on('door_closed', () => { playSound('door',0.4); showTip('🔒 DOOR LOCKED',1500); });
-socket.on('player_dead', () => { document.getElementById('dead').style.display='flex'; playSound('roar',0.8); });
+socket.on('player_dead', () => {
+  triggerScare('bigfoot_attack');
+  setTimeout(()=>{ document.getElementById('dead').style.display='flex'; },2000);
+  playJsSound('roar',1.0);
+});
 socket.on('joined', ({id,mapW,mapH}) => {
   myId=id; MAP_W=mapW; MAP_H=mapH;
   document.getElementById('join').style.display='none';
@@ -1059,12 +1101,247 @@ function animate(){
   drawMinimap();
   drawCamView();
 
+  // ── Jumpscares check ──
+  if(state && state.bigfoot) {
+    const bfw2=srvToWorld(state.bigfoot.x,state.bigfoot.y);
+    const bfd=pos.distanceTo(new THREE.Vector3(bfw2.x,0,bfw2.z));
+    checkJumpscares(dt, bfd);
+  }
+
   renderer.render(scene,camera);
 }
+
+// ══════════════════════════════════════════════════════
+//  JUMPSCARE ENGINE
+// ══════════════════════════════════════════════════════
+
+const JSOverlay = document.getElementById('js-overlay');
+const JSFace    = document.getElementById('js-face');
+const JSText    = document.getElementById('js-text');
+const JSStatic  = document.getElementById('js-static');
+const JSRed     = document.getElementById('js-red');
+
+let jsLocked = false;  // prevent stacking
+let jsRandomTimer = 30 + Math.random()*60; // first random scare in 30-90s
+
+// ── Scare types ────────────────────────────────────────
+const SCARES = [
+  {
+    id:'bigfoot_face',
+    face:'🦶', text:'IT FOUND YOU',
+    duration:1400, sound:'roar', vol:1.0,
+    shake:true, flash:true, static:true,
+  },
+  {
+    id:'bigfoot_close',
+    face:'👁️', text:'WATCHING YOU',
+    duration:900, sound:'roar', vol:0.7,
+    shake:true, flash:true, static:false,
+  },
+  {
+    id:'shadow',
+    face:'🌑', text:'SOMETHING MOVED',
+    duration:700, sound:'hb', vol:0.5,
+    shake:false, flash:false, static:true,
+  },
+  {
+    id:'snap',
+    face:'🌲', text:'TWIGS SNAP',
+    duration:600, sound:'trap', vol:0.6,
+    shake:true, flash:false, static:false,
+  },
+  {
+    id:'cam_face',
+    face:'📷', text:'CAM OFFLINE',
+    duration:800, sound:'static', vol:0.4,
+    shake:false, flash:false, static:true,
+  },
+  {
+    id:'bigfoot_attack',
+    face:'🦶', text:'YOU ARE DEAD',
+    duration:2000, sound:'roar', vol:1.0,
+    shake:true, flash:true, static:true,
+  },
+  {
+    id:'eyes',
+    face:'👀', text:'IT SEES YOU',
+    duration:750, sound:'roar', vol:0.6,
+    shake:true, flash:true, static:false,
+  },
+];
+
+// ── Play a scare ───────────────────────────────────────
+function triggerScare(id) {
+  if(jsLocked) return;
+  const scare = SCARES.find(s=>s.id===id) || SCARES[0];
+  jsLocked = true;
+  ensureAudio();
+
+  // Face & text
+  JSFace.textContent = scare.face;
+  JSText.textContent = scare.text;
+  JSFace.style.animation = 'none';
+  JSText.style.display = 'none';
+
+  // Show overlay
+  JSOverlay.style.display = 'flex';
+  JSOverlay.style.background = '#000';
+  void JSOverlay.offsetWidth; // reflow
+
+  // Pulse animation on face
+  JSFace.style.animation = `jsPulse ${scare.duration*0.001}s ease-in-out`;
+
+  // Show text halfway through
+  setTimeout(()=>{ JSText.style.display='block'; }, scare.duration*0.4);
+
+  // Red flash
+  if(scare.flash) {
+    JSRed.style.background='rgba(200,0,0,0.85)';
+    setTimeout(()=>JSRed.style.background='rgba(200,0,0,0)', 180);
+  }
+
+  // Screen shake
+  if(scare.shake) {
+    document.body.classList.add('shaking');
+    setTimeout(()=>document.body.classList.remove('shaking'), 650);
+  }
+
+  // Static overlay
+  if(scare.static) {
+    JSStatic.style.display='block';
+    animateStatic(scare.duration);
+  }
+
+  // Sound
+  playJsSound(scare.sound, scare.vol);
+
+  // Hide after duration
+  setTimeout(()=>{
+    JSOverlay.style.display='none';
+    JSText.style.display='none';
+    JSStatic.style.display='none';
+    JSStatic.style.opacity='0';
+    jsLocked=false;
+  }, scare.duration);
+}
+
+function animateStatic(duration) {
+  let start=null;
+  function frame(ts) {
+    if(!start) start=ts;
+    const p=(ts-start)/duration;
+    if(p>=1){JSStatic.style.opacity='0';return;}
+    // Flicker effect
+    JSStatic.style.opacity=(Math.random()*0.4+0.1*(1-p)).toFixed(2);
+    JSStatic.style.backgroundPositionX=Math.random()*100+'%';
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+// ── Jumpscare sounds ───────────────────────────────────
+function playJsSound(type, vol=0.8) {
+  ensureAudio();
+  const g=actx.createGain(); g.gain.value=vol; g.connect(actx.destination);
+
+  if(type==='roar') {
+    // Bigfoot roar — deep distorted growl
+    const b=actx.createBuffer(1,actx.sampleRate*1.8,actx.sampleRate);
+    const d=b.getChannelData(0);
+    for(let i=0;i<d.length;i++){
+      const t=i/actx.sampleRate;
+      d[i]=(
+        Math.sin(t*(60+Math.sin(t*2)*25)*Math.PI*2)*0.4 +
+        Math.sin(t*(120+Math.sin(t*3)*15)*Math.PI*2)*0.25 +
+        (Math.random()*2-1)*0.35
+      )*Math.exp(-t*0.9);
+    }
+    const s=actx.createBufferSource(); s.buffer=b;
+    const dist=actx.createWaveShaper();
+    const curve=new Float32Array(256);
+    for(let i=0;i<256;i++){const x=i*2/256-1; curve[i]=x*(Math.abs(x)+0.3)/(x*x+0.3+1);}
+    dist.curve=curve;
+    s.connect(dist); dist.connect(g); s.start();
+
+  } else if(type==='static') {
+    // TV static burst
+    const b=actx.createBuffer(1,actx.sampleRate*0.5,actx.sampleRate);
+    const d=b.getChannelData(0);
+    for(let i=0;i<d.length;i++){const t=i/actx.sampleRate; d[i]=(Math.random()*2-1)*Math.exp(-t*3);}
+    const s=actx.createBufferSource(); s.buffer=b;
+    const bpf=actx.createBiquadFilter(); bpf.type='bandpass'; bpf.frequency.value=3000; bpf.Q.value=0.3;
+    s.connect(bpf); bpf.connect(g); s.start();
+
+  } else if(type==='hb') {
+    // Heartbeat thud
+    const b=actx.createBuffer(1,actx.sampleRate*0.4,actx.sampleRate);
+    const d=b.getChannelData(0);
+    for(let i=0;i<d.length;i++){
+      const t=i/actx.sampleRate;
+      d[i]=(Math.sin(t*180*Math.PI*2)*Math.exp(-t*35)+Math.sin((t-0.06)*160*Math.PI*2)*Math.exp(-(t-0.06)*35)*0.8)*0.6;
+    }
+    const s=actx.createBufferSource(); s.buffer=b; s.connect(g); s.start();
+
+  } else if(type==='trap') {
+    // Sharp crack/snap
+    const b=actx.createBuffer(1,actx.sampleRate*0.2,actx.sampleRate);
+    const d=b.getChannelData(0);
+    for(let i=0;i<d.length;i++){const t=i/actx.sampleRate; d[i]=(Math.random()*2-1)*Math.exp(-t*50);}
+    const s=actx.createBufferSource(); s.buffer=b; s.connect(g); s.start();
+  }
+}
+
+// ── Scare triggers ─────────────────────────────────────
+let lastBfDist=999, scareCooldown=0;
+
+function checkJumpscares(dt, bfWorldDist) {
+  scareCooldown=Math.max(0,scareCooldown-dt);
+  jsRandomTimer-=dt;
+
+  // Random forest scare
+  if(jsRandomTimer<=0 && !jsLocked && scareCooldown<=0) {
+    jsRandomTimer=45+Math.random()*90;
+    scareCooldown=15;
+    const randomScares=['shadow','snap','eyes','cam_face'];
+    triggerScare(randomScares[Math.floor(Math.random()*randomScares.length)]);
+    return;
+  }
+
+  if(!state||!myId||scareCooldown>0||jsLocked) return;
+
+  // Bigfoot suddenly close (was far, now near)
+  if(lastBfDist>12 && bfWorldDist<8 && bfWorldDist>0) {
+    scareCooldown=20; triggerScare('bigfoot_close');
+  }
+  // Bigfoot VERY close
+  else if(bfWorldDist<4 && lastBfDist>=4) {
+    scareCooldown=12; triggerScare('eyes');
+  }
+
+  lastBfDist=bfWorldDist;
+}
+
+// Camera scare — trigger when switching cams and bigfoot is near cam
+function camScare() {
+  if(jsLocked||!state) return;
+  const bf=state.bigfoot;
+  const cam=state.cabin?.cameras?.[state.cabin?.activeCam];
+  if(!cam) return;
+  const d=Math.hypot(bf.x-cam.x,bf.y-cam.y);
+  if(d<200) {
+    setTimeout(()=>triggerScare('bigfoot_face'),300+Math.random()*400);
+  } else if(Math.random()<0.25) {
+    setTimeout(()=>triggerScare('cam_face'),500);
+  }
+}
+
+// ── Hook into existing events ──────────────────────────
+const _origSwCam=swCam;
+window.swCam=function(id){ _origSwCam(id); camScare(); };
+
 </script>
 <style>
 @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
 </style>
 </body>
 </html>
-HTMLEOF
